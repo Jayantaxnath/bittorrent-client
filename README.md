@@ -1,6 +1,12 @@
-# BitTorrent Client in Python
-
+# FluxTorrent: A BitTorrent Client
 > A hybrid BitTorrent client built to explore distributed systems, networking, concurrency, and protocol design.
+
+![BitTorrent](https://img.shields.io/badge/Protocol-BitTorrent-green)
+![Asyncio](https://img.shields.io/badge/Concurrency-Asyncio-orange)
+![Multithreading](https://img.shields.io/badge/Concurrency-Multithreaded-red)
+![P2P](https://img.shields.io/badge/Networking-Peer--to--Peer-purple)
+![Distributed Systems](https://img.shields.io/badge/System-Distributed-blueviolet)
+![Python](https://img.shields.io/badge/Python-3.10+-blue)
 
 ## Highlights
 
