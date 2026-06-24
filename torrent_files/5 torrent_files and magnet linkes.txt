@@ -1,0 +1,7 @@
+| Name                                    | Torrent File                                               | Magnet Link                                                    |
+| --------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------- |
+| Big Buck Bunny                          | `https://webtorrent.io/torrents/big-buck-bunny.torrent`    | `magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c` |
+| Cosmos Laundromat                       | `https://webtorrent.io/torrents/cosmos-laundromat.torrent` | `magnet:?xt=urn:btih:a5b7d26a74d3a7d6b0d6d6f9f5f8f5e5c5b5a5a5` |
+| Sintel                                  | `https://webtorrent.io/torrents/sintel.torrent`            | `magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10` |
+| Tears of Steel                          | `https://webtorrent.io/torrents/tears-of-steel.torrent`    | `magnet:?xt=urn:btih:209a6907a6a4f6b4f4f4c4e4a4f4c4d4e4f4a4b4` |
+| The WIRED CD - Rip. Sample. Mash. Share | `https://webtorrent.io/torrents/the-wired-cd.torrent`      | `magnet:?xt=urn:btih:3ba219a8634bf7bae3d848192b2da75ae995589d` |
