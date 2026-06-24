@@ -1,4 +1,4 @@
-# FluxTorrent: A BitTorrent Client
+# FluxTorrent: BitTorrent Client v2
 > A hybrid BitTorrent client built to explore distributed systems, networking, concurrency, and protocol design.
 
 ![BitTorrent](https://img.shields.io/badge/Protocol-BitTorrent-green)
