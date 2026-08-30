@@ -68,7 +68,7 @@ class DownloadWorker:
                     break
         
         except Exception as e:
-            print(f"[ERROR] {peer_key}: {str(e)[:60]}")
+            print(f"[error] {peer_key}: {str(e)[:60]}")
         
         finally:
             sock.close()
