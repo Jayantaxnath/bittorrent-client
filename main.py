@@ -84,7 +84,7 @@ class CycloneClient:
         )
         
         # Run trackers + peer validation for N seconds
-        print("[START] Discovering peers...")
+        print("\n[tracker] discovering peers from tcp/udp tarckers...")
         try:
             # Tracker -> raw_peer_queue -> RawPeerManager -> validated_peer_queue : is continuously working for 20s
             await asyncio.wait_for(
@@ -92,20 +92,32 @@ class CycloneClient:
                 timeout=30
             )
         except asyncio.TimeoutError:
-            print("[INFO] Peer discovery timeout, starting downloads...")
+            # new edge case : no peer found
+            if self.validated_peer_queue.empty():
+                print("[exit] zero peers found. cleaning up and exiting.")
+                self.file_writer.close()
+                return
+            
+            print("[info] peer discovery done.")
             tracker_task.cancel()
             raw_manager_task.cancel()
         
         # Get validated peers
         peers = await validated_manager.get_all_peers()
-        print(f"[READY] {len(peers)} validated peers. Starting download...")
+        
+        # new edge case: If no peers found, clean up and exit immediately
+        if not peers:
+            print("[exit] no valid peers found. cleaning up and exiting.")
+            self.file_writer.close()
+            return
         
         # Start downloads in threads (blocking I/O)
         # Threading = multiple OS threads
             # Thread 1 -> Peer A
             # Thread 2 -> Peer B
             # Thread 3 -> Peer C etc.
-
+            
+        print(f"\n[downloading] from {len(peers)} peers...")
         download_threads = []
         for peer_info in peers:
 
@@ -124,11 +136,11 @@ class CycloneClient:
             t.join()
         
         self.file_writer.close()
-        print("[COMPLETE] Download finished!")
+        print(f"[complete] 100% download completed!")
 
 if __name__ == "__main__":
     # Default fallback path
-    torrent_path = Path("./torrent_files/sintel.torrent")
+    torrent_path = Path("./torrent_files/test_folder.torrent")
 
     if len(sys.argv) > 1:
         provided_path = sys.argv[1].replace("\\", "/")
@@ -145,6 +157,6 @@ if __name__ == "__main__":
                 sys.exit(0)
 
     # Convert the Path object back to a string for your client if needed
-    print(f"Running client with: {torrent_path}")
+    print(f"[start] bittorrent client: {torrent_path}")
     client = CycloneClient(str(torrent_path))
     asyncio.run(client.run())
