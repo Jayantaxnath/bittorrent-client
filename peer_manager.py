@@ -47,7 +47,7 @@ class RawPeerManager:
                         self.validated.add(peer_info)
                         await self.validated_queue.put(peer_info)
                 except Exception as e:
-                    print(f"  [QUEUE ERROR] {repr(e)}")
+                    print(f"  [error] {repr(e)}")
 
     async def _validate_peer(self, peer):
         """TCP connect + Handshake + info_hash verification (blocking in executor)."""
@@ -75,7 +75,8 @@ class RawPeerManager:
                 return (ip, port) # Return a tuple, NOT a dictionary!
             
         except Exception as e:
-            print(f"[HANDSHAKE ERROR] {e}")
+            # print(f"[HANDSHAKE ERROR] {e}")
+            pass
         
         return None
 
@@ -90,13 +91,13 @@ class ValidatedPeerManager:
     
     async def get_all_peers(self):
         """Wait for peer accumulation then return list."""
-        print("[PEERS] Waiting for validated peers...")
+        print("[peers] validating peers...")
         
         # Collect peers for a time
         # Modern CPUs can easily juggle 40 concurrent I/O-bound Python th
         while len(self.peers) < 40:  # Maximum active download threads
             try:
-                peer = await asyncio.wait_for(self.validated_queue.get(), timeout=5)
+                peer = await asyncio.wait_for(self.validated_queue.get(), timeout=10)
                 if peer:
                     self.peers.append(peer)
             except asyncio.TimeoutError:
