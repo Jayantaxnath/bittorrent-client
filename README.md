@@ -1,4 +1,4 @@
-# FluxTorrent: BitTorrent Client v2
+# FluxTorrent v1 (`v1_threaded/`): threaded BitTorrent client
 > A hybrid BitTorrent client built to explore distributed systems, networking, concurrency, and protocol design.
 
 <!-- ![BitTorrent](https://img.shields.io/badge/Protocol-BitTorrent-green)
@@ -13,13 +13,17 @@
 - Concurrent HTTP tracker discovery using **asyncio**
 - Concurrent UDP tracker communication using **executor threads**
 - Peer validation through a **50-worker handshake pool**
-- Multi-peer downloading with **one thread per peer**
+- Multi-peer downloading with **one thread per peer**, refilled continuously as peers die
 - Thread-safe piece scheduling using **shared state + locks**
+- **Rarest-first** piece selection and **endgame mode**
 - Pipelined block requests for improved throughput
 - SHA-1 piece verification for data integrity
-- Multi-file torrent support
+- **Resume support**: existing pieces are re-verified and skipped
+- Multi-file torrent support (with path-traversal protection)
 
 ## Architecture
+
+Full concurrency diagram: [docs/concurrency-architecture.png](docs/concurrency-architecture.png), details in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```
             HTTP/HTTPS Trackers             UDP Trackers
@@ -47,8 +51,9 @@
                            (asyncio.Queue)
                                    │
                                    ▼
-                         DownloadWorker Threads
-                           (up to ~40 threads)
+                         Download pool (main.py)
+                    DownloadWorker Threads (up to 40,
+                       replaced when a peer dies)
 
            Peer A      Peer B      Peer C    ...     Peer X
              │           │           │                 │
@@ -121,10 +126,11 @@ peer_pieces
 
 The scheduler guarantees:
 
-- No duplicate downloads
+- No duplicate downloads (except on purpose in endgame)
 - Correct piece ownership tracking
 - Safe concurrent access
-- Failure recovery and reassignment
+- Failure recovery: a dead peer's pieces are released for others
+- Rarest-first: the piece the fewest peers have is downloaded first
 
 Implemented using:
 
@@ -146,7 +152,7 @@ Request
 Wait
 ```
 
-Torrent pipelines requests:
+FluxTorrent pipelines requests:
 
 ```text
 Request 1
@@ -189,13 +195,22 @@ Only verified pieces are committed to disk.
 - Data Integrity Verification
 
 
+## Usage
+
+```bash
+cd v1_threaded
+pip install -r requirements.txt
+python main.py                                 # default: torrents/test_folder.torrent -> downloads/
+python main.py torrents/test_folder.torrent [download_dir]
+```
+
+The second argument (download folder) is optional, default is `v1_threaded/downloads/`. Run the same command again to resume.
+
 ## Future Improvements
 
-- Rarest-first piece selection
-- Endgame mode
 - DHT support
 - Magnet links
 - Upload/Seeding support
-- Resume downloads
 - Peer Exchange (PEX)
+- Pipelining across piece boundaries
 - Fully asynchronous download engine

@@ -2,22 +2,26 @@ import asyncio
 import aiohttp
 import struct
 import socket
+import random
 import bencodepy
 from typing import Set, Tuple
 import urllib.parse  # Put this at the top of tracker_service.py
+
+REANNOUNCE_SECONDS = 300  # [NEW] ask trackers for fresh peers every 5 min (keeps the peer pool fed)
 
 
 class TrackerService:
     """Discovers peers from HTTP/HTTPS and UDP trackers concurrently."""
 
-    def __init__(self, torrent_data, info_hash, left, peer_queue):
+    def __init__(self, torrent_data, info_hash, left, peer_queue, peer_id):
         self.torrent_data = torrent_data
         self.info_hash = info_hash
         self.left = left
         self.peer_queue = peer_queue
-        self.peer_id = b"-CY0001-" + b"0" * 12  # Placeholder
+        self.peer_id = peer_id  # [FIX] same id as the download connections (was a placeholder)
 
         self.discovered = set()
+        self.first_announce = True  # [NEW] first round sends event=started
 
     async def run(self):
         """Main entry: extract trackers and query concurrently."""
@@ -29,16 +33,22 @@ class TrackerService:
 
         print(f"[tracker] found {len(tracker_urls)} trackers")
 
-        # Query HTTP and UDP in parallel
-        await asyncio.gather(
-            self._query_http_trackers(
-                [t for t in tracker_urls if t.startswith("http")]
-            ),
-            self._query_udp_trackers(
-                [t for t in tracker_urls if t.startswith("udp://")]
-            ),
-            return_exceptions=True,
-        )
+        # [NEW] Loop forever (main cancels us): announce, sleep, announce again.
+        while True:
+            # Query HTTP and UDP in parallel
+            await asyncio.gather(
+                self._query_http_trackers(
+                    [t for t in tracker_urls if t.startswith("http")]
+                ),
+                self._query_udp_trackers(
+                    [t for t in tracker_urls if t.startswith("udp://")]
+                ),
+                return_exceptions=True,
+            )
+
+            self.first_announce = False
+            print(f"[tracker] {len(self.discovered)} unique peers so far, next announce in {REANNOUNCE_SECONDS}s")
+            await asyncio.sleep(REANNOUNCE_SECONDS)
 
     def _extract_trackers(self) -> Set[str]:
         """Extract tracker URLs from torrent metadata."""
@@ -54,6 +64,19 @@ class TrackerService:
 
         return trackers
 
+    async def _queue_peers(self, peers, source):
+        """[NEW] Single place where peers enter raw_peer_queue: drops junk + duplicates.
+        Called as soon as ONE tracker answers, so a slow tracker never delays the others."""
+        new_peers = 0
+        for ip, port in peers:
+            if port == 0 or ip == "0.0.0.0" or (ip, port) in self.discovered:
+                continue
+            self.discovered.add((ip, port))
+            await self.peer_queue.put((ip, port))  # switch point 3
+            new_peers += 1
+
+        print(f"  ✓ {source}: {len(peers)} peers ({new_peers} new)")
+
     async def _query_http_trackers(self, urls: list):
         """Query HTTP/HTTPS trackers concurrently."""
         if not urls:
@@ -61,37 +84,34 @@ class TrackerService:
 
         async with aiohttp.ClientSession() as session:
             tasks = [self._http_announce(session, url) for url in urls]
-            results = await asyncio.gather(
+            await asyncio.gather(
                 *tasks, return_exceptions=True
             )  # switch point 1, 2 is in _http_announce
-
-        for peers in results:
-            if peers:
-                for peer in peers:
-                    await self.peer_queue.put(peer)  # switch point 3
 
     async def _http_announce(self, session, tracker_url):
         """Single HTTP tracker query."""
         try:
             # Use byte-keys and byte-values for proper URL encoding
-            query_string = urllib.parse.urlencode(
-                {
-                    b"info_hash": self.info_hash,
-                    b"peer_id": self.peer_id,
-                    b"port": 6881,
-                    b"uploaded": 0,
-                    b"downloaded": 0,
-                    b"left": self.left,
-                    b"compact": 1,
-                }
-            )
+            params = {
+                b"info_hash": self.info_hash,
+                b"peer_id": self.peer_id,
+                b"port": 6881,
+                b"uploaded": 0,
+                b"downloaded": 0,
+                b"left": self.left,
+                b"compact": 1,
+            }
+            if self.first_announce:
+                params[b"event"] = b"started"  # [NEW] tells the tracker we just joined
+
+            query_string = urllib.parse.urlencode(params)
 
             # Append the properly encoded string to the URL manually
             url_with_query = f"{tracker_url}?{query_string}"
 
             # Do NOT use the params= kwarg here anymore
             async with session.get(
-                url_with_query, timeout=aiohttp.ClientTimeout(5)
+                url_with_query, timeout=aiohttp.ClientTimeout(10)
             ) as resp:
                 if resp.status != 200:
                     print(f"  [http {resp.status}] {tracker_url}")
@@ -111,8 +131,7 @@ class TrackerService:
                 peers = self._parse_peers(peers_data)
 
                 if peers:
-                    print(f"  ✓ {tracker_url}: {len(peers)} peers")
-                    return peers
+                    await self._queue_peers(peers, tracker_url)  # [FIX] queue right away
 
         except asyncio.TimeoutError:
             print(f"  [timeout] {tracker_url}")
@@ -128,14 +147,14 @@ class TrackerService:
 
         # socket and sock.recvfrom is blocking so using loop.run_in_executor
         # to assigns urls works to multiple thread
-        loop = asyncio.get_event_loop()
-        tasks = [loop.run_in_executor(None, self._udp_announce, url) for url in urls]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        loop = asyncio.get_running_loop()
 
-        for peers in results:
+        async def announce(url):
+            peers = await loop.run_in_executor(None, self._udp_announce, url)
             if peers:
-                for peer in peers:
-                    await self.peer_queue.put(peer)
+                await self._queue_peers(peers, url)  # [FIX] queue as each tracker answers
+
+        await asyncio.gather(*[announce(url) for url in urls], return_exceptions=True)
 
     def _udp_announce(self, tracker_url):
         """Single UDP tracker query (blocking)."""
@@ -145,12 +164,12 @@ class TrackerService:
             port = int(port)
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # blocking 1
-            sock.settimeout(5)
+            sock.settimeout(10)
 
             # Connect
             protocol_id = 0x41727101980
             action = 0
-            transaction_id = 12345
+            transaction_id = random.getrandbits(32)  # [FIX] was a fixed 12345, must be random
             connect_req = struct.pack(">QII", protocol_id, action, transaction_id)
             sock.sendto(connect_req, (host, port))
 
@@ -163,7 +182,8 @@ class TrackerService:
 
             # Announce
             action = 1
-            transaction_id = 12346
+            transaction_id = random.getrandbits(32)
+            event = 2 if self.first_announce else 0  # [NEW] 2 = started, 0 = none
             announce_req = struct.pack(
                 ">QII20s20sQQQIIIIH",
                 connection_id,
@@ -174,7 +194,7 @@ class TrackerService:
                 0,
                 self.left,
                 0,  # downloaded, left, uploaded
-                0,
+                event,
                 0,
                 0,
                 100,
@@ -194,19 +214,11 @@ class TrackerService:
                 sock.close()
                 return None
 
-            # Parse peers
-            peers = []
-            peer_data = response[20:]
-            for i in range(0, len(peer_data), 6):
-                if i + 6 <= len(peer_data):
-                    ip = ".".join(map(str, peer_data[i : i + 4]))
-                    port = struct.unpack(">H", peer_data[i + 4 : i + 6])[0]
-                    peers.append((ip, port))
+            # Parse peers (same 6-byte compact format as HTTP, so reuse _parse_peers)
+            peers = self._parse_peers(response[20:])
 
             sock.close()
 
-            if peers:
-                print(f"  ✓ {tracker_url}: {len(peers)} peers")
             return peers if peers else None
 
         except Exception as e:
@@ -214,8 +226,12 @@ class TrackerService:
             return None
 
     def _parse_peers(self, peers_data):
-        """Parse compact peer format."""
+        """Parse both compact and dictionary peer format."""
         peers = []
+
+        # compact format (efficient)
+        # each peer >>> 6 bytes: 4 bytes(ip) + 2 bytes(port, big-endian)
+
         if isinstance(peers_data, bytes):
             for i in range(0, len(peers_data), 6):
                 if i + 6 <= len(peers_data):
@@ -223,6 +239,8 @@ class TrackerService:
                     port = struct.unpack(">H", peers_data[i + 4 : i + 6])[0]
                     peers.append((ip, port))
         else:
+
+            # Each peer as a dictionary with ip, port, peer id
             for peer in peers_data:
                 ip = (
                     peer[b"ip"].decode()
