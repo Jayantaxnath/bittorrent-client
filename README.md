@@ -1,216 +1,73 @@
-# FluxTorrent v1 (`v1_threaded/`): threaded BitTorrent client
-> A hybrid BitTorrent client built to explore distributed systems, networking, concurrency, and protocol design.
+# FluxTorrent v2 (`v2_asyncio/`): asyncio download engine + DHT/PEX experiments
 
-<!-- ![BitTorrent](https://img.shields.io/badge/Protocol-BitTorrent-green)
-![Asyncio](https://img.shields.io/badge/Concurrency-Asyncio-orange)
-![Multithreading](https://img.shields.io/badge/Concurrency-Multithreaded-red)
-![P2P](https://img.shields.io/badge/Networking-Peer--to--Peer-purple)
-![Distributed Systems](https://img.shields.io/badge/System-Distributed-blueviolet)
-![Python](https://img.shields.io/badge/Python-3.10+-blue) -->
+A **self-contained service**: it has its own code, sample torrents, download folder and dependencies.
+It imports nothing from `v1_threaded/` and can be copied anywhere and run on its own.
 
-## Highlights
-
-- Concurrent HTTP tracker discovery using **asyncio**
-- Concurrent UDP tracker communication using **executor threads**
-- Peer validation through a **50-worker handshake pool**
-- Multi-peer downloading with **one thread per peer**, refilled continuously as peers die
-- Thread-safe piece scheduling using **shared state + locks**
-- **Rarest-first** piece selection and **endgame mode**
-- Pipelined block requests for improved throughput
-- SHA-1 piece verification for data integrity
-- **Resume support**: existing pieces are re-verified and skipped
-- Multi-file torrent support (with path-traversal protection)
-
-## Architecture
-
-Full concurrency diagram: [docs/concurrency-architecture.png](docs/concurrency-architecture.png), details in [ARCHITECTURE.md](ARCHITECTURE.md).
+## Folder layout
 
 ```
-            HTTP/HTTPS Trackers             UDP Trackers
-                    │                            │
-                    ▼                            ▼
-        ┌───────────────────────┐    ┌───────────────────────┐
-        │ TrackerService (HTTP) │    │ TrackerService (UDP)  │
-        │   (Asyncio Tasks)     │    │  (Executor Threads)   │
-        └───────────┬───────────┘    └───────────┬───────────┘
-                    │                            │
-                    └──────────────┬─────────────┘
-                                   │
-                                   ▼
-                             raw_peer_queue
-                             (asyncio.Queue)
-                                   │
-                                   ▼
-                        ┌─────────────────────┐
-                        │   RawPeerManager    │
-                        │ (Thread Pool - 50)  │
-                        └──────────┬──────────┘
-                                   │
-                                   ▼
-                         validated_peer_queue
-                           (asyncio.Queue)
-                                   │
-                                   ▼
-                         Download pool (main.py)
-                    DownloadWorker Threads (up to 40,
-                       replaced when a peer dies)
-
-           Peer A      Peer B      Peer C    ...     Peer X
-             │           │           │                 │
-             └───────────┴─────┬─────┴─────────────────┘
-                               │
-                               ▼
-                   ┌───────────────────────┐
-                   │    PieceScheduler     │
-                   │    (Shared State)     │
-                   │   [threading.Lock]    │
-                   └───────────┬───────────┘
-                               │
-                               ▼
-                   ┌───────────────────────┐
-                   │      FileWriter       │
-                   │     (Thread-safe)     │
-                   └───────────┬───────────┘
-                               │
-                               ▼
-                        Downloaded File
+v2_asyncio/
+├── download.py            ← ENTRY POINT: download a torrent with the asyncio engine
+├── requirements.txt       aiohttp, bencodepy
+├── engine/                the asyncio downloader (see engine/README.md for the design)
+│   ├── torrent.py         parse .torrent
+│   ├── discovery.py       trackers (HTTP/UDP) + DHT
+│   ├── peer.py            one peer connection (coroutine)
+│   ├── picker.py          block-level piece picker (rarest-first, endgame)
+│   ├── session.py         peer pool, hashing, progress, summary
+│   └── storage.py         disk thread, resume, safe paths
+├── scripts/               step-by-step experiments, run them in this order
+│   ├── basic_dht_lookup.py    1. first simple DHT lookup (learning version)
+│   ├── discover_peers.py      2. DHT + PEX: find peers without a tracker
+│   └── validate_peers.py      3. check which of those peers we can REALLY download from
+├── torrents/              sample .torrent files (test_folder, big-buck-bunny)
+├── data/                  generated peer lists (dht_peers, pex_peers, all_peers, validated_peers)
+└── downloads/             default output folder of download.py
 ```
 
-## Concurrency Model
+## The story: from "find peers" to "download"
 
-### Async Layer
-
-Used for tracker discovery and orchestration.
-
-```text
-HTTP Tracker 1
-HTTP Tracker 2
-HTTP Tracker 3
-        │
-        ▼
- asyncio.gather(...)
+```
+1 basic_dht_lookup   simple, sequential DHT walk (slow, but easy to read)
+        ↓
+2 discover_peers     proper Kademlia lookup (closest-first by XOR distance, 16 queries in parallel)
+                     + PEX (ask connected peers for THEIR peers)         → data/all_peers.txt
+        ↓
+3 validate_peers     handshake → has pieces → unchoked → sent a real block → data/validated_peers.txt
+        ↓
+4 download.py        asyncio engine downloads, using trackers + DHT (+ optional validated peers)
 ```
 
-### Validation Layer
-
-Peer handshakes execute concurrently inside a thread pool.
-
-```text
-Thread 1  -> Peer A
-Thread 2  -> Peer B
-Thread 3  -> Peer C
-...
-Thread 50 -> Peer Z
-```
-
-### Download Layer
-
-Each validated peer receives a dedicated download thread.
-
-```text
-Thread 1 -> Peer A
-Thread 2 -> Peer B
-Thread 3 -> Peer C
-...
-```
-
-## Piece Scheduling
-
-Shared state maintained across all download threads:
-
-```python
-have_pieces
-in_progress
-peer_pieces
-```
-
-The scheduler guarantees:
-
-- No duplicate downloads (except on purpose in endgame)
-- Correct piece ownership tracking
-- Safe concurrent access
-- Failure recovery: a dead peer's pieces are released for others
-- Rarest-first: the piece the fewest peers have is downloaded first
-
-Implemented using:
-
-```python
-threading.Lock()
-```
-
-
-## Request Pipelining
-
-Instead of:
-
-```text
-Request
-Wait
-Request
-Wait
-Request
-Wait
-```
-
-FluxTorrent pipelines requests:
-
-```text
-Request 1
-Request 2
-Request 3
-...
-Request 16
-```
-
-allowing peers to continuously stream blocks without idle network time.
-
-
-## Piece Verification
-
-Every completed piece is verified before writing:
-
-```text
-Downloaded Piece
-        │
-        ▼
-SHA-1(piece)
-        │
-        ▼
-Expected Torrent Hash
-```
-
-Only verified pieces are committed to disk.
-
-## Core Concepts Demonstrated
-
-- Distributed Systems
-- Peer-to-Peer Networking
-- Async Programming
-- Multithreading
-- Thread Synchronization
-- Producer-Consumer Architecture
-- Queue-Based Communication
-- TCP/UDP Socket Programming
-- Binary Protocol Implementation
-- Data Integrity Verification
-
-
-## Usage
+## How to run (from inside `v2_asyncio/`)
 
 ```bash
-cd v1_threaded
+cd v2_asyncio
 pip install -r requirements.txt
-python main.py                                 # default: torrents/test_folder.torrent -> downloads/
-python main.py torrents/test_folder.torrent [download_dir]
+
+# 1-3: discovery experiments (default torrent: torrents/big-buck-bunny.torrent, a popular one with many peers)
+python scripts/discover_peers.py [torrent_file]
+python scripts/validate_peers.py [torrent_file] [peers_file]
+
+# 4: download (default torrent: torrents/test_folder.torrent, default output: downloads/)
+python download.py
+python download.py torrents/test_folder.torrent -o ./my_downloads
+python download.py torrents/big-buck-bunny.torrent --peers-file data/validated_peers.txt
 ```
 
-The second argument (download folder) is optional, default is `v1_threaded/downloads/`. Run the same command again to resume.
+Run it again on the same folder to **resume**: finished pieces are re-verified and skipped.
+Requirements: Python 3.10+.
 
-## Future Improvements
+## Results so far (one live swarm each, numbers vary between runs)
 
-- DHT support
-- Magnet links
-- Upload/Seeding support
-- Peer Exchange (PEX)
-- Pipelining across piece boundaries
-- Fully asynchronous download engine
+| Experiment | Result |
+|---|---|
+| DHT + PEX on big-buck-bunny | 430 peers from DHT (30 s), PEX added 6 (3 new) |
+| Validation of those 433 peers | 33 handshakes OK, **20 downloadable** (all seeders), 91% never answered |
+| v1 (`../v1_threaded`) on test_folder | 83-90 s, ~0.22 MiB/s (2 runs) |
+| v2 engine on test_folder | **20-39 s, 0.5-0.95 MiB/s** (4 runs), 0 hash failures, resume works |
+
+## Notes and limits
+
+- The engine is **leech only** (no upload, no incoming connections), IPv4 only, no PEX inside the engine.
+- Private torrents: DHT/PEX are disabled by the spec, so discovery uses trackers only.
+- DHT peer lists are mostly stale: expect ~5% of the peers to be usable.
